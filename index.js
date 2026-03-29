@@ -87,7 +87,7 @@ function log(level, ...args) {
 // ─── PostgreSQL Pool ──────────────────────────────────────────────────────────
 let pool = null;
 function getPool() {
-  if (!pool) {
+  if (!pool || pool.ended) {
     pool = new Pool(PG);
     pool.on('error', err => log('error', 'PG pool error', err.message));
   }
@@ -157,34 +157,45 @@ async function pgQuery(sql, params = [], timeoutMs = 8000) {
 
 // ─── Semantic search over memos ──────────────────────────────────────────────
 async function semanticSearch(query, { topK = 10, minScore = 0.5 } = {}) {
-  const embed = await getEmbedding(query);
-  // memos stores content in `content` column; we search raw text similarity
-  // For v0.1 we do a lightweight approximate: pull recent memos and rank by
-  // keyword overlap + trust that the shared OpenClaw embedding model handles semantics.
-  // A full vector index (pgvector) can be added in v0.2.
+  // Stable v1: do NOT remote-embed every memo row inside answer path.
+  // Use PostgreSQL candidate retrieval first, then lightweight local scoring.
+  const q = String(query || '').trim();
+  if (!q) return { ok: true, results: [] };
+
+  const terms = Array.from(new Set(q.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean))).slice(0, 8);
+  const likeParams = [];
+  const clauses = [];
+  for (const t of terms) {
+    likeParams.push(`%${t}%`);
+    clauses.push(`LOWER(content) LIKE $${likeParams.length}`);
+  }
+  const whereLike = clauses.length ? `AND (${clauses.join(' OR ')})` : '';
+
   const res = await pgQuery(
     `SELECT id, creator_id, content, payload, created_ts, updated_ts
      FROM memo
      WHERE visibility = 'PRIVATE' AND LENGTH(content) > 20
+       ${whereLike}
      ORDER BY updated_ts DESC
-     LIMIT 40`
+     LIMIT 30`,
+    likeParams
   );
   if (!res.ok) return { ok: false, error: res.error };
 
-  // Score each memo by cosine similarity of query embedding vs memo text embedding
-  const scored = [];
-  for (const row of res.rows) {
-    try {
-      const rowEmbed = await getEmbedding(row.content.slice(0, 2000));
-      const score = cosineSim(embed, rowEmbed);
-      if (score >= minScore) {
-        scored.push({ ...row, score: parseFloat(score.toFixed(4)) });
-      }
-    } catch {
-      // skip on embed failure
-    }
-  }
-  scored.sort((a, b) => b.score - a.score);
+  const scoreRow = (row) => {
+    const content = String(row.content || '').toLowerCase();
+    let hits = 0;
+    for (const t of terms) if (content.includes(t)) hits++;
+    const ratio = terms.length ? hits / terms.length : 0;
+    const recencyBoost = row.updated_ts ? 0.05 : 0;
+    return parseFloat((ratio + recencyBoost).toFixed(4));
+  };
+
+  const scored = res.rows
+    .map(row => ({ ...row, score: scoreRow(row) }))
+    .filter(row => row.score >= Math.min(minScore, 0.2))
+    .sort((a, b) => b.score - a.score || (b.updated_ts || 0) - (a.updated_ts || 0));
+
   return { ok: true, results: scored.slice(0, topK) };
 }
 
@@ -484,42 +495,83 @@ const TOOLS = {
       }
 
       case 'layer2_answer': {
+        log('info', 'layer2_answer:start', JSON.stringify(args || {}));
         const { query, topK = 5 } = args || {};
         if (!query) return '❌ query is required';
+
+        // Stage 1: evidence only, fast and stable
+        log('info', 'layer2_answer:semantic_search');
         const sem = await semanticSearch(query, { topK, minScore: 0.45 });
         const evidence = sem.ok ? sem.results.slice(0, topK) : [];
-        const recall = await hindsight.recall(query, { topK: 6 });
-        const h = await hindsight.healthcheck();
-        let reflect = null;
-        const fastPath = /为什么喜欢|偏好|原因/.test(query) && /gotti|leah/i.test(query);
-        if (h.ok && !fastPath) {
-          reflect = await hindsight.reflect(query);
-        }
-        const recallMemories = Array.isArray(recall?.data?.results) ? recall.data.results : [];
         const facts = [];
         for (const item of evidence.slice(0, 3)) {
-          facts.push(`- [score=${item.score}] ${String(item.content).slice(0, 180)}`);
+          const content = String(item.content || '').replace(/\s+/g, ' ').slice(0, 180);
+          facts.push(`- [score=${item.score}] ${content}`);
         }
-        for (const item of recallMemories.slice(0, 3)) {
-          facts.push(`- [recall] ${String(item.text || '').slice(0, 180)}`);
+
+        // Stage 2: Hindsight as optional enhancer only; hard timeout to avoid tool hang
+        log('info', 'layer2_answer:semantic_done', `hits=${evidence.length}`);
+        let recallMemories = [];
+        let reflect = null;
+        let hindsightUsed = false;
+        try {
+          log('info', 'layer2_answer:hindsight_health');
+          const _hcCfg = hindsight.loadHindsightConfig();
+          const _hcBase = (_hcCfg.baseUrl || 'http://127.0.0.1:8888').replace(/\/+$/, '');
+          const h = await new Promise(resolve => {
+            const _lib = require('http');
+            const _req = _lib.request({
+              hostname: '127.0.0.1', port: 8888,
+              path: '/health', method: 'GET'
+            }, _res => {
+              let _d = ''; _res.on('data', c => _d += c);
+              _res.on('end', () => resolve({ ok: _res.statusCode >= 200 && _res.statusCode < 300 }));
+            });
+            _req.on('timeout', () => { _req.destroy(); resolve({ ok: false, detail: 'hc-timeout' }); });
+            _req.on('error', e => resolve({ ok: false, detail: e.message }));
+            _req.setTimeout(3000);
+            _req.end();
+            setTimeout(() => resolve({ ok: false, detail: 'hc-fallback' }), 3500);
+          });
+          if (h?.ok) {
+            hindsightUsed = true;
+            log('info', 'layer2_answer:hindsight_recall');
+            const recall = await Promise.race([
+              hindsight.recall(query, { topK: 4 }),
+              new Promise(resolve => setTimeout(() => resolve({ ok: false, error: 'hindsight recall timeout' }), 15000))
+            ]);
+            recallMemories = Array.isArray(recall?.data?.results) ? recall.data.results : [];
+            const filteredRecall = recallMemories.filter(item => {
+              const t = String(item.text || '');
+              if (!t.trim()) return false;
+              if (/pg 版 memos API 写入测试|发送了一条消息|没有完成，没有提交报告/.test(t)) return false;
+              return true;
+            });
+            recallMemories = filteredRecall;
+            for (const item of filteredRecall.slice(0, 2)) {
+              facts.push(`- [recall] ${String(item.text || '').replace(/\s+/g, ' ').slice(0, 180)}`);
+            }
+            log('info', 'layer2_answer:hindsight_reflect');
+            reflect = await Promise.race([
+              hindsight.reflect(query),
+              new Promise(resolve => setTimeout(() => resolve(null), 18000))
+            ]).catch(() => null);
+          }
+        } catch (_) {
+          // degrade gracefully, never block answer path
         }
-        const joined = evidence.map(x => String(x.content || '')).join('\n');
-        const recallJoined = recallMemories.map(x => String(x.text || '')).join('\n');
-        const combined = `${joined}\n${recallJoined}\n${query}`;
-        const reasonLocked = /gotti|leah/i.test(combined) && /会摇|很会摇|摇起来|摇得/.test(combined);
-        let judgment = '未形成稳定归纳';
-        if (reasonLocked) {
-          judgment = '从已记录证据看，你喜欢 Gotti 的核心原因就是：她会摇。这是当前证据里最明确、最稳定的偏好线索。';
-        } else if (reflect?.ok) {
+
+        let judgment = '未查到足够证据';
+        if (reflect?.ok) {
           judgment = typeof reflect.data === 'string'
             ? reflect.data.slice(0, 600)
             : String(reflect.data?.text || JSON.stringify(reflect.data)).slice(0, 600);
         } else if (evidence.length || recallMemories.length) {
-          judgment = '已找到相关证据，但当前 Hindsight 未稳定收口；先按证据做保守归纳。';
-        } else {
-          judgment = '未查到足够证据';
+          judgment = '已找到相关证据，但当前归纳层未稳定收口；先按证据保守回答。';
         }
-        return `已确认事实：\n${facts.length ? facts.join('\n') : '- 无'}\n\n归纳判断：\n- ${judgment}\n\n不确定点：\n- ${reasonLocked ? '当前答案已被证据优先规则锁定；若底层记忆变更需重新验证' : (reflect?.ok ? 'Hindsight 已参与归纳，但仍应以证据为准' : 'Hindsight 未接通，当前仅基于 memos semantic evidence')}`;
+
+        log('info', 'layer2_answer:return', `facts=${facts.length} hindsightUsed=${hindsightUsed}`);
+        return `已确认事实：\n${facts.length ? facts.join('\n') : '- 无'}\n\n归纳判断：\n- ${judgment}\n\n不确定点：\n- ${hindsightUsed ? 'Hindsight 已作为增强层参与；最终仍应以证据为准' : '当前未稳定使用 Hindsight 结果，已自动降级为证据优先回答'}`;
       }
 
       case 'layer2_version': {
@@ -587,15 +639,17 @@ async function handleLine(line) {
 async function main() {
   process.stdin.setEncoding('utf8');
   let buffer = '';
-  process.stdin.on('data', chunk => {
+  process.stdin.on('data', async chunk => {
     buffer += chunk;
     let idx;
     while ((idx = buffer.indexOf('\n')) >= 0) {
       const line = buffer.slice(0, idx);
       buffer = buffer.slice(idx + 1);
-      handleLine(line).catch(e => {
+      try {
+        await handleLine(line);
+      } catch (e) {
         process.stderr.write(JSON.stringify({ jsonrpc: '2.0', id: null, error: { message: e.message } }) + '\n');
-      });
+      }
     }
   });
 

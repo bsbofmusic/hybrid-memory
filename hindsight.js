@@ -28,38 +28,73 @@ function loadHindsightConfig() {
 
 async function hcFetch(path, options = {}) {
   const cfg = loadHindsightConfig();
-  const url = `${cfg.baseUrl.replace(/\/$/, '')}${path}`;
-  const res = await fetch(url, options);
-  const text = await res.text();
-  let json = null;
-  try { json = JSON.parse(text); } catch {}
-  return { ok: res.ok, status: res.status, text, json };
+  const base = cfg.baseUrl.replace(/\/$/, '');
+  const urlStr = `${base}${path}`;
+  let parsed;
+  try { parsed = new URL(urlStr); } catch { parsed = { hostname: '127.0.0.1', port: '8888', pathname: path, search: '' }; }
+  const lib = (parsed.protocol === 'https:') ? require('https') : require('http');
+  const timeoutMs = Math.min(Number(process.env.HINDSIGHT_TIMEOUT_MS || 3000), 3000);
+  const method = (options || {}).method || 'GET';
+  const headers = (options || {}).headers || {};
+  const body = (options || {}).body || null;
+
+  return new Promise(resolve => {
+    let settled = false;
+    const done = (val) => { if (!settled) { settled = true; resolve(val); } };
+    const req = lib.request({
+      hostname: parsed.hostname || '127.0.0.1',
+      port:    parsed.port    || '8888',
+      path:    (parsed.pathname || '') + (parsed.search || ''),
+      method,
+      headers,
+      timeout: timeoutMs,
+    }, res => {
+      let data = '';
+      res.on('data', c => { data += c; });
+      res.on('end', () => {
+        let json = null;
+        try { json = JSON.parse(data); } catch { /* noop */ }
+        done({ ok: res.statusCode >= 200 && res.statusCode < 300, status: res.statusCode, text: data, json });
+      });
+    });
+    req.on('timeout', () => { req.destroy(); done({ ok: false, status: 0, detail: 'hindsight http timeout' }); });
+    req.on('error', e  => done({ ok: false, status: 0, detail: e.message }));
+    if (body) req.write(body);
+    req.end();
+    setTimeout(() => { if (!settled) { req.destroy(); done({ ok: false, status: 0, detail: 'hindsight max-wait exceeded' }); } }, timeoutMs + 200);
+  });
 }
 
 async function healthcheck() {
   const cfg = loadHindsightConfig();
+  console.error('[hindsight] healthcheck:start', JSON.stringify({ baseUrl: cfg.baseUrl, bankId: cfg.bankId }));
   if (!cfg.enabled) return { ok: false, detail: 'HINDSIGHT_ENABLED=0' };
   try {
     const r = await hcFetch('/health');
+    console.error('[hindsight] healthcheck:/health', JSON.stringify({ ok: r.ok, status: r.status }));
     if (r.ok) return { ok: true, detail: 'health endpoint reachable' };
   } catch {}
   try {
     const r = await hcFetch('/');
+    console.error('[hindsight] healthcheck:/', JSON.stringify({ ok: r.ok, status: r.status }));
     if (r.ok || r.status < 500) return { ok: true, detail: `root reachable (${r.status})` };
     return { ok: false, detail: `HTTP ${r.status}` };
   } catch (e) {
-    return { ok: false, detail: e.message };
+    console.error('[hindsight] healthcheck:error', e?.name || 'Error', e?.message || String(e));
+    return { ok: false, detail: e?.message || String(e) };
   }
 }
 
 async function ensureBank() {
   const cfg = loadHindsightConfig();
+  console.error('[hindsight] ensureBank:start', JSON.stringify({ bankId: cfg.bankId }));
   const body = JSON.stringify({ reflect_mission: 'Layer2 advanced memory bank for OpenClaw recall and reflection' });
   return hcFetch(`/v1/default/banks/${encodeURIComponent(cfg.bankId)}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body });
 }
 
 async function recall(query, { topK = 5 } = {}) {
   const cfg = loadHindsightConfig();
+  console.error('[hindsight] recall:start', JSON.stringify({ bankId: cfg.bankId, topK, query: String(query).slice(0,80) }));
   await ensureBank();
   const body = JSON.stringify({ query, max_tokens: 4096, budget: 'mid' });
   const path = `/v1/default/banks/${encodeURIComponent(cfg.bankId)}/memories/recall`;
@@ -74,6 +109,7 @@ async function recall(query, { topK = 5 } = {}) {
 
 async function reflect(query) {
   const cfg = loadHindsightConfig();
+  console.error('[hindsight] reflect:start', JSON.stringify({ bankId: cfg.bankId, query: String(query).slice(0,80) }));
   await ensureBank();
   const body = JSON.stringify({ query, include: { facts: {} }, max_tokens: 1024, budget: 'low' });
   const path = `/v1/default/banks/${encodeURIComponent(cfg.bankId)}/reflect`;
