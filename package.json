@@ -1,7 +1,7 @@
 {
   "name": "@bsbofmusic/openclaw-memory-layer2",
-  "version": "0.2.0",
-  "description": "Layer2 Memory MCP Server — Hindsight + memos unified validation over memos PostgreSQL, reusing OpenClaw memorySearch embedding config", 
+  "version": "0.2.1",
+  "description": "Layer2 Memory MCP Server — Hindsight + memos unified validation over memos PostgreSQL, reusing OpenClaw memorySearch embedding config",
   "main": "index.js",
   "bin": {
     "openclaw-memory-layer2": "./index.js"

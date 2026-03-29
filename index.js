@@ -557,26 +557,17 @@ const TOOLS = {
         const { query, topK = 5 } = args || {};
         if (!query) return '❌ query is required';
 
-        // Stage 1: evidence only, fast and stable
+        // Stage 1: semantic search over memos (candidates)
         log('info', 'layer2_answer:semantic_search');
-        const sem = await semanticSearch(query, { topK, minScore: 0.45 });
-        const evidence = sem.ok ? sem.results.slice(0, topK) : [];
-        const facts = [];
-        for (const item of evidence.slice(0, 3)) {
-          const content = extractDisplayText(item.content || '').slice(0, 320);
-          if (!content) continue;
-          facts.push(`- [score=${item.score}] ${content}`);
-        }
+        const sem = await semanticSearch(query, { topK: 15, minScore: 0.35 });
+        const rawMemos = sem.ok ? sem.results : [];
+        const qTerms = String(query || '').toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
 
-        // Stage 2: Hindsight as optional enhancer only; hard timeout to avoid tool hang
-        log('info', 'layer2_answer:semantic_done', `hits=${evidence.length}`);
+        // Stage 2: Hindsight recall (candidates)
+        log('info', 'layer2_answer:hindsight_recall');
         let recallMemories = [];
-        let reflect = null;
         let hindsightUsed = false;
         try {
-          log('info', 'layer2_answer:hindsight_health');
-          const _hcCfg = hindsight.loadHindsightConfig();
-          const _hcBase = (_hcCfg.baseUrl || 'http://127.0.0.1:8888').replace(/\/+$/, '');
           const h = await new Promise(resolve => {
             const _lib = require('http');
             const _req = _lib.request({
@@ -586,54 +577,79 @@ const TOOLS = {
               let _d = ''; _res.on('data', c => _d += c);
               _res.on('end', () => resolve({ ok: _res.statusCode >= 200 && _res.statusCode < 300 }));
             });
-            _req.on('timeout', () => { _req.destroy(); resolve({ ok: false, detail: 'hc-timeout' }); });
-            _req.on('error', e => resolve({ ok: false, detail: e.message }));
-            _req.setTimeout(3000);
+            _req.on('timeout', () => { _req.destroy(); resolve({ ok: false }); });
+            _req.on('error', () => resolve({ ok: false }));
+            _req.setTimeout(2000);
             _req.end();
-            setTimeout(() => resolve({ ok: false, detail: 'hc-fallback' }), 3500);
+            setTimeout(() => resolve({ ok: false }), 2500);
           });
+
           if (h?.ok) {
             hindsightUsed = true;
-            log('info', 'layer2_answer:hindsight_recall');
             const recall = await Promise.race([
-              hindsight.recall(query, { topK: 4 }),
-              new Promise(resolve => setTimeout(() => resolve({ ok: false, error: 'hindsight recall timeout' }), 15000))
+              hindsight.recall(query, { topK: 6 }),
+              new Promise(resolve => setTimeout(() => resolve({ ok: false }), 8000))
             ]);
             recallMemories = Array.isArray(recall?.data?.results) ? recall.data.results : [];
-            const filteredRecall = recallMemories.filter(item => {
-              const t = String(item.text || '').toLowerCase();
-              if (!t.trim()) return false;
-              // 丢弃测试桩和系统噪声，不卡 query 关键词（召回多样性优先）
-              if (/pg 版 memos API 写入测试|发送了一条消息|没有完成，没有提交报告|^这是一条 /.test(t)) return false;
-              return true;
-            });
-            recallMemories = filteredRecall;
-            for (const item of filteredRecall.slice(0, 2)) {
-              const recallText = extractDisplayText(item.text || '').slice(0, 220);
-              if (!recallText) continue;
-              facts.push(`- [recall] ${recallText}`);
-            }
-            log('info', 'layer2_answer:hindsight_reflect');
-            reflect = await Promise.race([
-              hindsight.reflect(query),
-              new Promise(resolve => setTimeout(() => resolve(null), 18000))
-            ]).catch(() => null);
           }
-        } catch (_) {
-          // degrade gracefully, never block answer path
+        } catch (_) {}
+
+        // Stage 3: The Judge (memos-as-judge)
+        // Combine and filter based on strict term matching if score is low
+        const facts = [];
+        const seenTexts = new Set();
+
+        // 1. Prioritize Hindsight results but verify them against query terms
+        const filteredRecall = recallMemories.filter(item => {
+          const t = String(item.text || '').toLowerCase();
+          if (!t.trim() || /pg 版 memos API 写入测试|发送了一条消息|没有完成|^这是一条 /.test(t)) return false;
+          // If we have query terms, check if the recall matches at least one (looser judge for hindsight)
+          return qTerms.length === 0 || qTerms.some(term => t.includes(term));
+        });
+
+        for (const item of filteredRecall.slice(0, 3)) {
+          const text = extractDisplayText(item.text || '').slice(0, 250);
+          if (text && !seenTexts.has(text)) {
+            facts.push(`- [recall] ${text}`);
+            seenTexts.add(text);
+          }
         }
 
-        let judgment = '未查到足够证据';
+        // 2. Add high-quality semantic hits as supporting evidence
+        const verifiedMemos = rawMemos.filter(item => {
+          const content = extractDisplayText(item.content || '').toLowerCase();
+          if (!content || seenTexts.has(content)) return false;
+          // High confidence threshold
+          if (item.score >= 0.85) return true;
+          // Medium confidence + strict term match
+          return item.score >= 0.45 && qTerms.every(term => content.includes(term));
+        });
+
+        for (const item of verifiedMemos.slice(0, Math.max(0, 5 - facts.length))) {
+          const content = extractDisplayText(item.content || '').slice(0, 250);
+          facts.push(`- [evidence] ${content}`);
+          seenTexts.add(content);
+        }
+
+        // Stage 4: Synthesis
+        log('info', 'layer2_answer:hindsight_reflect');
+        let reflect = null;
+        if (hindsightUsed && facts.length > 0) {
+          reflect = await Promise.race([
+            hindsight.reflect(query),
+            new Promise(resolve => setTimeout(() => resolve(null), 12000))
+          ]).catch(() => null);
+        }
+
+        let judgment = facts.length > 0 ? '已找到相关证据，先按证据回答。' : '未查到足够证据';
         if (reflect?.ok) {
           judgment = typeof reflect.data === 'string'
-            ? reflect.data.slice(0, 600)
-            : String(reflect.data?.text || JSON.stringify(reflect.data)).slice(0, 600);
-        } else if (evidence.length || recallMemories.length) {
-          judgment = '已找到相关证据，但当前归纳层未稳定收口；先按证据保守回答。';
+            ? reflect.data.slice(0, 800)
+            : String(reflect.data?.text || JSON.stringify(reflect.data)).slice(0, 800);
         }
 
-        log('info', 'layer2_answer:return', `facts=${facts.length} hindsightUsed=${hindsightUsed}`);
-        return `已确认事实：\n${facts.length ? facts.join('\n') : '- 无'}\n\n归纳判断：\n- ${judgment}\n\n不确定点：\n- ${hindsightUsed ? 'Hindsight 已作为增强层参与；最终仍应以证据为准' : '当前未稳定使用 Hindsight 结果，已自动降级为证据优先回答'}`;
+        log('info', 'layer2_answer:return', `facts=${facts.length}`);
+        return `已确认事实：\n${facts.length ? facts.join('\n') : '- 无'}\n\n归纳判断：\n- ${judgment}\n\n不确定点：\n- ${hindsightUsed ? 'Hindsight 已作为增强层参与' : 'Hindsight 离线，仅使用本地证据'}\n\n[PRO-TIP] 证据召回由 memos + Hindsight 双路裁决：memos 负责硬核实锤（实体对齐），Hindsight 负责语义联想。`;
       }
 
       case 'layer2_version': {
