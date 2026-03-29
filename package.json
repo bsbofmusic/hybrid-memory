@@ -1,0 +1,46 @@
+{
+  "name": "@bsbofmusic/openclaw-memory-layer2",
+  "version": "0.2.0",
+  "description": "Layer2 Memory MCP Server — Hindsight + memos unified validation over memos PostgreSQL, reusing OpenClaw memorySearch embedding config", 
+  "main": "index.js",
+  "bin": {
+    "openclaw-memory-layer2": "./index.js"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "doctor": "node doctor.js",
+    "pm2:start": "pm2 start pm2.layer2.config.cjs",
+    "pm2:restart": "pm2 restart openclaw-memory-layer2",
+    "pm2:stop": "pm2 stop openclaw-memory-layer2",
+    "feed:hindsight": "node feed_hindsight_from_memos.js"
+  },
+  "dependencies": {
+    "@vectorize-io/hindsight-client": "^0.4.20",
+    "pg": "^8.11.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "openclaw",
+    "memory",
+    "mcp",
+    "layer2",
+    "memos",
+    "semantic-search"
+  ],
+  "author": "bsbofmusic",
+  "license": "MIT",
+  "files": [
+    "index.js",
+    "doctor.js",
+    "hindsight.js",
+    "feed_hindsight_from_memos.js",
+    "pm2.layer2.config.cjs",
+    "README.md",
+    "start.sh"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

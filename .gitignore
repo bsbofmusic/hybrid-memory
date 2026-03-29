@@ -1,0 +1,5 @@
+node_modules/
+*.tgz
+.layer2-runtime/
+*.log
+npm-debug.log*
