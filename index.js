@@ -156,17 +156,25 @@ async function pgQuery(sql, params = [], timeoutMs = 8000) {
 }
 
 // ─── Semantic search over memos ──────────────────────────────────────────────
-async function semanticSearch(query, { topK = 10, minScore = 0.5 } = {}) {
-  // Stable v1: do NOT remote-embed every memo row inside answer path.
-  // Use PostgreSQL candidate retrieval first, then lightweight local scoring.
+async function semanticSearch(query, { topK = 10, minScore = 0.2 } = {}) {
+  // 中文友好版候选召回：支持单字匹配、关键词模糊匹配、高召回低误杀
   const q = String(query || '').trim();
   if (!q) return { ok: true, results: [] };
 
+  // 中文单字拆分 + 关键词拆分双轨
+  const chars = Array.from(new Set(q.toLowerCase().split('').filter(c => c.trim().length > 0 && /[\u4e00-\u9fa5a-z0-9]/i.test(c)))).slice(0, 16);
   const terms = Array.from(new Set(q.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean))).slice(0, 8);
+  const allTerms = Array.from(new Set([...chars, ...terms]));
+  
   const likeParams = [];
   const clauses = [];
+  // 先做关键词匹配，再做单字匹配
   for (const t of terms) {
     likeParams.push(`%${t}%`);
+    clauses.push(`LOWER(content) LIKE $${likeParams.length}`);
+  }
+  for (const c of chars) {
+    likeParams.push(`%${c}%`);
     clauses.push(`LOWER(content) LIKE $${likeParams.length}`);
   }
   const whereLike = clauses.length ? `AND (${clauses.join(' OR ')})` : '';
@@ -177,7 +185,7 @@ async function semanticSearch(query, { topK = 10, minScore = 0.5 } = {}) {
      WHERE visibility = 'PRIVATE' AND LENGTH(content) > 20
        ${whereLike}
      ORDER BY updated_ts DESC
-     LIMIT 30`,
+     LIMIT 50`, // 扩大候选池
     likeParams
   );
   if (!res.ok) return { ok: false, error: res.error };
@@ -185,15 +193,21 @@ async function semanticSearch(query, { topK = 10, minScore = 0.5 } = {}) {
   const scoreRow = (row) => {
     const content = String(row.content || '').toLowerCase();
     let hits = 0;
-    for (const t of terms) if (content.includes(t)) hits++;
-    const ratio = terms.length ? hits / terms.length : 0;
-    const recencyBoost = row.updated_ts ? 0.05 : 0;
+    // 完整关键词命中权重更高
+    for (const t of terms) if (content.includes(t)) hits += 2;
+    // 单字命中权重低
+    for (const c of chars) if (content.includes(c)) hits += 0.5;
+    // 命中越多得分越高，满分为 terms.length*2 + chars.length*0.5
+    const totalPossible = terms.length * 2 + chars.length * 0.5;
+    const ratio = totalPossible > 0 ? hits / totalPossible : 0;
+    // 近期内容加权
+    const recencyBoost = row.updated_ts ? 0.1 : 0;
     return parseFloat((ratio + recencyBoost).toFixed(4));
   };
 
   const scored = res.rows
     .map(row => ({ ...row, score: scoreRow(row) }))
-    .filter(row => row.score >= Math.min(minScore, 0.2))
+    .filter(row => row.score >= Math.min(minScore, 0.1)) // 降低最低分阈值，提升召回
     .sort((a, b) => b.score - a.score || (b.updated_ts || 0) - (a.updated_ts || 0));
 
   return { ok: true, results: scored.slice(0, topK) };
@@ -542,9 +556,13 @@ const TOOLS = {
             ]);
             recallMemories = Array.isArray(recall?.data?.results) ? recall.data.results : [];
             const filteredRecall = recallMemories.filter(item => {
-              const t = String(item.text || '');
+              const t = String(item.text || '').toLowerCase();
               if (!t.trim()) return false;
               if (/pg 版 memos API 写入测试|发送了一条消息|没有完成，没有提交报告/.test(t)) return false;
+              // 必须包含至少一个查询关键词，否则丢弃
+              const qLower = query.toLowerCase();
+              const terms = qLower.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+              if (!terms.some(term => t.includes(term))) return false;
               return true;
             });
             recallMemories = filteredRecall;
