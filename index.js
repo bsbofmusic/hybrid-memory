@@ -157,18 +157,17 @@ async function pgQuery(sql, params = [], timeoutMs = 8000) {
 
 // ─── Semantic search over memos ──────────────────────────────────────────────
 async function semanticSearch(query, { topK = 10, minScore = 0.2 } = {}) {
-  // 中文友好版候选召回：支持单字匹配、关键词模糊匹配、高召回低误杀
+  // 混合检索模式：关键词召回 + 向量召回，双路融合提升准确率
   const q = String(query || '').trim();
   if (!q) return { ok: true, results: [] };
 
-  // 中文单字拆分 + 关键词拆分双轨
+  // 1. 关键词召回分支
   const chars = Array.from(new Set(q.toLowerCase().split('').filter(c => c.trim().length > 0 && /[\u4e00-\u9fa5a-z0-9]/i.test(c)))).slice(0, 16);
   const terms = Array.from(new Set(q.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean))).slice(0, 8);
   const allTerms = Array.from(new Set([...chars, ...terms]));
   
   const likeParams = [];
   const clauses = [];
-  // 先做关键词匹配，再做单字匹配
   for (const t of terms) {
     likeParams.push(`%${t}%`);
     clauses.push(`LOWER(content) LIKE $${likeParams.length}`);
@@ -178,36 +177,65 @@ async function semanticSearch(query, { topK = 10, minScore = 0.2 } = {}) {
     clauses.push(`LOWER(content) LIKE $${likeParams.length}`);
   }
   const whereLike = clauses.length ? `AND (${clauses.join(' OR ')})` : '';
-
-  const res = await pgQuery(
+  const keywordRes = await pgQuery(
     `SELECT id, creator_id, content, payload, created_ts, updated_ts
      FROM memo
      WHERE visibility = 'PRIVATE' AND LENGTH(content) > 20
        ${whereLike}
      ORDER BY updated_ts DESC
-     LIMIT 50`, // 扩大候选池
+     LIMIT 30`,
     likeParams
   );
-  if (!res.ok) return { ok: false, error: res.error };
 
-  const scoreRow = (row) => {
-    const content = String(row.content || '').toLowerCase();
-    let hits = 0;
-    // 完整关键词命中权重更高
-    for (const t of terms) if (content.includes(t)) hits += 2;
-    // 单字命中权重低
-    for (const c of chars) if (content.includes(c)) hits += 0.5;
-    // 命中越多得分越高，满分为 terms.length*2 + chars.length*0.5
-    const totalPossible = terms.length * 2 + chars.length * 0.5;
-    const ratio = totalPossible > 0 ? hits / totalPossible : 0;
-    // 近期内容加权
-    const recencyBoost = row.updated_ts ? 0.1 : 0;
-    return parseFloat((ratio + recencyBoost).toFixed(4));
-  };
+  // 2. 向量召回分支（如果有embedding字段存在）
+  const embedRes = { rows: [] };
+  try {
+    const queryEmbedding = await getEmbedding(q);
+    const vecRes = await pgQuery(
+      `SELECT id, creator_id, content, payload, created_ts, updated_ts, 1 - (embedding <=> $1::vector) as score
+       FROM memo
+       WHERE visibility = 'PRIVATE' AND LENGTH(content) > 20
+         AND embedding IS NOT NULL
+       ORDER BY embedding <=> $1::vector
+       LIMIT 30`,
+      [JSON.stringify(queryEmbedding)]
+    );
+    if (vecRes.ok) embedRes.rows = vecRes.rows;
+  } catch {}
 
-  const scored = res.rows
-    .map(row => ({ ...row, score: scoreRow(row) }))
-    .filter(row => row.score >= Math.min(minScore, 0.1)) // 降低最低分阈值，提升召回
+  // 3. 结果去重合并
+  const merged = new Map();
+  // 关键词结果加权
+  keywordRes.rows?.forEach(row => {
+    if (!merged.has(row.id)) {
+      let score = 0;
+      const content = String(row.content || '').toLowerCase();
+      let hits = 0;
+      for (const t of terms) if (content.includes(t)) hits += 2;
+      for (const c of chars) if (content.includes(c)) hits += 0.5;
+      const totalPossible = terms.length * 2 + chars.length * 0.5;
+      const ratio = totalPossible > 0 ? hits / totalPossible : 0;
+      const recencyBoost = row.updated_ts ? 0.1 : 0;
+      score = parseFloat((ratio + recencyBoost).toFixed(4));
+      merged.set(row.id, { ...row, score, source: 'keyword' });
+    }
+  });
+  // 向量结果加权
+  embedRes.rows?.forEach(row => {
+    if (!merged.has(row.id)) {
+      merged.set(row.id, { ...row, score: parseFloat((row.score || 0).toFixed(4)), source: 'vector' });
+    } else {
+      // 双命中加权
+      const existing = merged.get(row.id);
+      existing.score = parseFloat((Math.max(existing.score, row.score) * 1.2).toFixed(4));
+      existing.source = 'hybrid';
+      merged.set(row.id, existing);
+    }
+  });
+
+  // 4. 排序取topK
+  const scored = Array.from(merged.values())
+    .filter(row => row.score >= Math.min(minScore, 0.1))
     .sort((a, b) => b.score - a.score || (b.updated_ts || 0) - (a.updated_ts || 0));
 
   return { ok: true, results: scored.slice(0, topK) };
