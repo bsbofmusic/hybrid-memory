@@ -84,6 +84,16 @@ function log(level, ...args) {
   }
 }
 
+function extractDisplayText(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return '';
+  const parts = s.split(/\n\s*\n/);
+  let body = parts.length > 1 ? parts.slice(1).join(' ').trim() : s;
+  body = body.replace(/\[(uid|source|chat_id|session|timestamp|sender|message_id|mode|part):[^\]]*\]/g, ' ');
+  body = body.replace(/\s+/g, ' ').trim();
+  return body;
+}
+
 // ─── PostgreSQL Pool ──────────────────────────────────────────────────────────
 let pool = null;
 function getPool() {
@@ -234,8 +244,14 @@ async function semanticSearch(query, { topK = 10, minScore = 0.2 } = {}) {
   });
 
   // 4. 排序取topK
+  const noisyContent = (content) => {
+    const s = String(content || '');
+    return /\{\"jsonrpc\":\"2\.0\"|layer2_answer:start|STDOUT\+STDERR|Internal task completion event|source: subagent|Stats: runtime|Action:/i.test(s);
+  };
+
   const scored = Array.from(merged.values())
     .filter(row => row.score >= Math.min(minScore, 0.1))
+    .filter(row => !noisyContent(row.content))
     .sort((a, b) => b.score - a.score || (b.updated_ts || 0) - (a.updated_ts || 0));
 
   return { ok: true, results: scored.slice(0, topK) };
@@ -547,7 +563,8 @@ const TOOLS = {
         const evidence = sem.ok ? sem.results.slice(0, topK) : [];
         const facts = [];
         for (const item of evidence.slice(0, 3)) {
-          const content = String(item.content || '').replace(/\s+/g, ' ').slice(0, 180);
+          const content = extractDisplayText(item.content || '').slice(0, 320);
+          if (!content) continue;
           facts.push(`- [score=${item.score}] ${content}`);
         }
 
@@ -586,16 +603,15 @@ const TOOLS = {
             const filteredRecall = recallMemories.filter(item => {
               const t = String(item.text || '').toLowerCase();
               if (!t.trim()) return false;
-              if (/pg 版 memos API 写入测试|发送了一条消息|没有完成，没有提交报告/.test(t)) return false;
-              // 必须包含至少一个查询关键词，否则丢弃
-              const qLower = query.toLowerCase();
-              const terms = qLower.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
-              if (!terms.some(term => t.includes(term))) return false;
+              // 丢弃测试桩和系统噪声，不卡 query 关键词（召回多样性优先）
+              if (/pg 版 memos API 写入测试|发送了一条消息|没有完成，没有提交报告|^这是一条 /.test(t)) return false;
               return true;
             });
             recallMemories = filteredRecall;
             for (const item of filteredRecall.slice(0, 2)) {
-              facts.push(`- [recall] ${String(item.text || '').replace(/\s+/g, ' ').slice(0, 180)}`);
+              const recallText = extractDisplayText(item.text || '').slice(0, 220);
+              if (!recallText) continue;
+              facts.push(`- [recall] ${recallText}`);
             }
             log('info', 'layer2_answer:hindsight_reflect');
             reflect = await Promise.race([
