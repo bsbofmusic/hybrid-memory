@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 /**
- * openclaw-memory-layer2 MCP Server v0.2.0
+ * hybrid-memory MCP Server v0.2.3
  *
- * Layer2 Memory: semantic + structured recall over memos PostgreSQL.
+ * Hybrid Memory: semantic + structured recall over memos PostgreSQL.
  *
  * Architecture:
  *   Layer 1 (File Brain)  : OpenClaw memorySearch — semantic main-chain (BAAI/bge-m3 + siliconflow + sqlite-vec)
- *   Layer 2 (Raw Facts)   : memos PostgreSQL — original words, details, temporal context
+ *   Hybrid Memory (Facts) : memos PostgreSQL — original words, details, temporal context
  *
- * This MCP provides Layer2 tools:
+ * This MCP provides memory tools:
  *   - semantic_search  : reuse OpenClaw memorySearch embedding config → cosine similarity against memos content
  *   - query_memos      : structured SELECT over memos PostgreSQL
  *   - ingest_session   : trigger session → memos ingest (calls ingest script)
@@ -92,6 +92,232 @@ function extractDisplayText(raw) {
   body = body.replace(/\[(uid|source|chat_id|session|timestamp|sender|message_id|mode|part):[^\]]*\]/g, ' ');
   body = body.replace(/\s+/g, ' ').trim();
   return body;
+}
+
+function normalizeTerms(s) {
+  const raw = String(s || '').toLowerCase().trim();
+  if (!raw) return [];
+
+  const stopwords = new Set([
+    '我','你','他','她','它','我们','你们','他们','她们','它们',
+    '什么','怎么','为什么','有没有','是不是','哪些','哪个','多少','几点','时候','是谁',
+    '最近','最新','上次','一次','一下','一下子','这个','那个','这些','那些',
+    '关于','有关','相关','情况','问题','事情','内容','信息','记录','记忆',
+    '一下','下','吗','呢','啊','呀','吧','了','的','得','地','和','与','及','并',
+    'what','why','how','when','where','who','is','are','the','a','an','of','to','for'
+  ]);
+
+  const out = [];
+  const parts = raw
+    .split(/[^\p{L}\p{N}-]+/u)
+    .map(x => x.trim())
+    .filter(Boolean);
+
+  for (const part of parts) {
+    if (!part || /^\d+$/.test(part) || stopwords.has(part)) continue;
+    if (part.length >= 2) out.push(part);
+
+    const hanRuns = part.match(/[\p{Script=Han}]{2,}/gu) || [];
+    for (const run of hanRuns) {
+      if (run.length >= 2 && !stopwords.has(run)) out.push(run);
+      if (run.length >= 4) {
+        for (let i = 0; i <= run.length - 2; i++) {
+          const bg = run.slice(i, i + 2);
+          if (!stopwords.has(bg) && !/什么|怎么|为什么|是谁|最近|最新|一次/.test(bg)) out.push(bg);
+        }
+      }
+    }
+  }
+
+  return Array.from(new Set(out)).slice(0, 20);
+}
+
+function inferQueryPlan(query) {
+  const q = String(query || '').trim();
+  const lower = q.toLowerCase();
+  const terms = normalizeTerms(q);
+  const entityTerms = terms.filter(t => t.length >= 2 && t.length <= 12 && !/什么|怎么|为什么|有没有|最近|最新|一次|情况|问题|事情|是谁/.test(t));
+  const wantsRecent = /最近|最新|上次|最近一次|last|latest|recent/i.test(q);
+  const wantsCause = /为什么|原因|根因|归因|坑|问题|故障|分析|rca/i.test(q);
+  const wantsQuote = /原话|怎么说|具体怎么说|哪句|原文/i.test(q);
+  const wantsRelation = /关系|区别|分工|职责|是什么/i.test(q);
+  const wantsRule = /规则|要求|口径|机制|模式|架构/i.test(q);
+  const abstractLevel = /什么|怎么|为什么|关系|区别|要求|最近/i.test(q) ? 'abstract' : 'concrete';
+  return {
+    raw: q,
+    lower,
+    terms,
+    entityTerms,
+    wantsRecent,
+    wantsCause,
+    wantsQuote,
+    wantsRelation,
+    wantsRule,
+    abstractLevel,
+  };
+}
+
+function termHitCount(text, terms) {
+  const s = String(text || '').toLowerCase();
+  if (!s || !terms?.length) return 0;
+  return terms.filter(term => s.includes(term)).length;
+}
+
+function isNoiseText(text) {
+  const s = String(text || '');
+  return /\{"jsonrpc":"2\.0"|layer2_answer:start|STDOUT\+STDERR|Internal task completion event|source: subagent|Stats: runtime|Action:|pg 版 memos API 写入测试|发送了一条消息|没有完成|^这是一条 /i.test(s);
+}
+
+function buildSemanticGate(plan, item) {
+  const content = extractDisplayText(item?.content || '').toLowerCase();
+  if (!content || isNoiseText(content)) return { pass: false, reason: 'empty_or_noise', hits: 0, score: item?.score || 0 };
+  const terms = plan.entityTerms.length ? plan.entityTerms : plan.terms;
+  const hits = termHitCount(content, terms);
+  const score = Number(item?.score || 0);
+  const hardHit = score >= 0.92;
+  const keywordHit = terms.length > 0 && hits >= Math.min(2, terms.length);
+  const mixedHit = score >= 0.72 && hits >= 1;
+  return {
+    pass: hardHit || keywordHit || mixedHit,
+    reason: hardHit ? 'hard_score' : keywordHit ? 'keyword_hit' : mixedHit ? 'mixed_hit' : 'rejected',
+    hits,
+    score,
+  };
+}
+
+function judgeEvidence(plan, alignedMemos, recallMemories, fileBrainHits = []) {
+  const seen = new Set();
+  const evidence = [];
+  const recall = [];
+  const fileEvidence = [];
+  const terms = plan.entityTerms.length ? plan.entityTerms : plan.terms;
+
+  const filteredRecall = (Array.isArray(recallMemories) ? recallMemories : []).filter(item => {
+    const text = extractDisplayText(item?.text || '').toLowerCase();
+    if (!text || isNoiseText(text)) return false;
+    const hits = termHitCount(text, terms);
+    if (!terms.length) return true;
+    return hits >= Math.min(2, Math.max(1, terms.length)) || (plan.abstractLevel === 'abstract' && hits >= 1);
+  });
+
+  for (const item of filteredRecall.slice(0, 3)) {
+    const text = extractDisplayText(item?.text || '').slice(0, 250);
+    if (text && !seen.has(text)) {
+      recall.push({ type: 'recall', text, rank: 'B' });
+      seen.add(text);
+    }
+  }
+
+  for (const item of fileBrainHits) {
+    const text = extractDisplayText(item?.text || '').slice(0, 250);
+    const label = `${text} (Source: ${item.path}#L${item.line})`;
+    if (text && !seen.has(label)) {
+      fileEvidence.push({ type: 'file', text: label, rank: item.score >= 0.82 ? 'A' : 'B', score: item.score, hits: item.hits });
+      seen.add(label);
+    }
+    if (fileEvidence.length >= 3) break;
+  }
+
+  for (const item of alignedMemos) {
+    const content = extractDisplayText(item?.content || '').slice(0, 250);
+    if (!content || seen.has(content)) continue;
+    const gate = buildSemanticGate(plan, item);
+    if (!gate.pass) continue;
+    const rank = gate.score >= 0.85 || gate.hits >= Math.max(2, terms.length) ? 'A' : 'B';
+    evidence.push({ type: 'evidence', text: content, rank, score: gate.score, hits: gate.hits, updated_ts: item?.updated_ts || 0 });
+    seen.add(content);
+    if (evidence.length >= 5) break;
+  }
+
+  evidence.sort((a, b) => {
+    const rankScore = { A: 2, B: 1 };
+    return (rankScore[b.rank] - rankScore[a.rank]) || ((b.score || 0) - (a.score || 0)) || ((b.updated_ts || 0) - (a.updated_ts || 0));
+  });
+
+  return { recall, fileEvidence, evidence, facts: [...fileEvidence, ...recall, ...evidence].slice(0, 5) };
+}
+
+function synthesizeJudgment(plan, judged, reflectText, hindsightUsed) {
+  const factCount = judged.facts.length;
+  const highRankCount = judged.evidence.filter(x => x.rank === 'A').length;
+  const hasRecall = judged.recall.length > 0;
+  const hasHardEvidence = judged.evidence.length > 0;
+  const hasFileEvidence = judged.fileEvidence?.length > 0;
+
+  let judgment = '未查到足够证据';
+  if (hasHardEvidence && highRankCount > 0) {
+    judgment = '已找到高置信证据，优先按证据回答。';
+  } else if (hasHardEvidence || hasRecall || hasFileEvidence) {
+    judgment = '已找到候选证据，但仍以实体对齐后的本地证据为准。';
+  }
+
+  if (reflectText && (hasHardEvidence || hasFileEvidence)) {
+    judgment = `${judgment} Hindsight 仅作为辅助归纳，不覆盖事实层。`;
+  } else if (reflectText && !hasHardEvidence && hasRecall) {
+    judgment = '已找到回忆候选，但缺少足够硬证据，归纳仅供参考。';
+  }
+
+  const uncertainty = [];
+  if (!hasHardEvidence && hasRecall) uncertainty.push('有回忆候选，但缺少足够硬证据完成裁决');
+  if (!factCount) uncertainty.push('当前 query 与已沉淀记忆之间可能存在表征鸿沟');
+  uncertainty.push(hindsightUsed ? 'Hindsight 已作为增强层参与' : 'Hindsight 未参与，本次仅基于本地证据');
+
+  return { judgment, uncertainty };
+}
+
+function scoreFileEvidence(plan, text) {
+  const clean = extractDisplayText(text || '');
+  if (!clean || isNoiseText(clean)) return { pass: false, score: 0, hits: 0 };
+  const lower = clean.toLowerCase();
+  const terms = plan.entityTerms.length ? plan.entityTerms : plan.terms;
+  const hits = termHitCount(lower, terms);
+  const wantsRecentBoost = plan.wantsRecent && /2026-|最近|当前|现行|已确认|起|新增|收口/.test(clean) ? 0.12 : 0;
+  const wantsCauseBoost = plan.wantsCause && /根因|归因|修复|教训|问题/.test(clean) ? 0.12 : 0;
+  const wantsRuleBoost = plan.wantsRule && /规则|口径|机制|架构|固定/.test(clean) ? 0.12 : 0;
+  const base = hits >= 2 ? 0.78 : hits >= 1 ? 0.58 : 0;
+  const score = Math.min(1, base + wantsRecentBoost + wantsCauseBoost + wantsRuleBoost);
+  const pass = score >= 0.7 || (plan.abstractLevel === 'abstract' && score >= 0.58);
+  return { pass, score, hits };
+}
+
+function readFileBrainCandidates() {
+  const candidates = [];
+  const fixed = [
+    path.join(WORKSPACE, 'MEMORY.md'),
+    path.join(WORKSPACE, 'memory', '2026-03-29.md'),
+    path.join(WORKSPACE, 'memory', '2026-03-30.md'),
+  ];
+  for (const fp of fixed) {
+    try {
+      if (fs.existsSync(fp)) {
+        candidates.push({ path: fp, content: fs.readFileSync(fp, 'utf8') });
+      }
+    } catch {}
+  }
+  return candidates;
+}
+
+function retrieveFileBrain(plan) {
+  const out = [];
+  for (const file of readFileBrainCandidates()) {
+    const lines = String(file.content || '').split('\n');
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (!line || line.length < 8) continue;
+      const s = scoreFileEvidence(plan, line);
+      if (!s.pass) continue;
+      out.push({
+        type: 'file',
+        path: path.relative(WORKSPACE, file.path),
+        line: i + 1,
+        text: line,
+        score: s.score,
+        hits: s.hits,
+      });
+    }
+  }
+  out.sort((a, b) => (b.score - a.score) || (b.hits - a.hits));
+  return out.slice(0, 5);
 }
 
 // ─── PostgreSQL Pool ──────────────────────────────────────────────────────────
@@ -554,107 +780,114 @@ const TOOLS = {
 
       case 'layer2_answer': {
         log('info', 'layer2_answer:start', JSON.stringify(args || {}));
-        const { query, topK = 5 } = args || {};
+        const { query } = args || {};
         if (!query) return '❌ query is required';
 
-        // Stage 1: semantic search over memos (candidates)
-        log('info', 'layer2_answer:semantic_search');
-        const sem = await semanticSearch(query, { topK: 15, minScore: 0.35 });
-        const rawMemos = sem.ok ? sem.results : [];
-        const qTerms = String(query || '').toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+        const plan = inferQueryPlan(query);
+        log('info', 'layer2_answer:plan', JSON.stringify({
+          terms: plan.terms,
+          entityTerms: plan.entityTerms,
+          wantsRecent: plan.wantsRecent,
+          wantsCause: plan.wantsCause,
+          wantsQuote: plan.wantsQuote,
+          wantsRelation: plan.wantsRelation,
+          wantsRule: plan.wantsRule,
+          abstractLevel: plan.abstractLevel,
+        }));
 
-        // Stage 2: Hindsight recall (candidates)
-        log('info', 'layer2_answer:hindsight_recall');
+        // 轻脚本供料：memos 主位，file brain fallback，Hindsight recall 增强
+        log('info', 'layer2_answer:semantic_search');
+        const sem = await semanticSearch(query, { topK: 8, minScore: 0.28 });
+        const rawMemos = sem.ok ? sem.results : [];
+        const topScore = rawMemos[0]?.score || 0;
+        const alignedMemos = rawMemos.filter(item => !isNoiseText(item?.content || '')).slice(0, 5);
+        const fileBrainHits = (plan.wantsRule || plan.wantsRelation || plan.wantsRecent || topScore < 0.72)
+          ? retrieveFileBrain(plan)
+          : [];
+
         let recallMemories = [];
         let hindsightUsed = false;
-        try {
-          const h = await new Promise(resolve => {
-            const _lib = require('http');
-            const _req = _lib.request({
-              hostname: '127.0.0.1', port: 8888,
-              path: '/health', method: 'GET'
-            }, _res => {
-              let _d = ''; _res.on('data', c => _d += c);
-              _res.on('end', () => resolve({ ok: _res.statusCode >= 200 && _res.statusCode < 300 }));
-            });
-            _req.on('timeout', () => { _req.destroy(); resolve({ ok: false }); });
-            _req.on('error', () => resolve({ ok: false }));
-            _req.setTimeout(2000);
-            _req.end();
-            setTimeout(() => resolve({ ok: false }), 2500);
-          });
-
-          if (h?.ok) {
-            hindsightUsed = true;
-            const recall = await Promise.race([
-              hindsight.recall(query, { topK: 6 }),
-              new Promise(resolve => setTimeout(() => resolve({ ok: false }), 8000))
+        const shouldUseHindsight = rawMemos.length > 0 || plan.abstractLevel === 'abstract';
+        log('info', 'layer2_answer:hindsight_gate', JSON.stringify({ shouldUseHindsight, topScore, raw: rawMemos.length, fileBrainHits: fileBrainHits.length }));
+        if (shouldUseHindsight) {
+          try {
+            const h = await Promise.race([
+              hindsight.healthcheck(),
+              new Promise(resolve => setTimeout(() => resolve({ ok: false, detail: 'health timeout' }), 1200))
             ]);
-            recallMemories = Array.isArray(recall?.data?.results) ? recall.data.results : [];
-          }
-        } catch (_) {}
-
-        // Stage 3: The Judge (memos-as-judge)
-        // Combine and filter based on strict term matching if score is low
-        const facts = [];
-        const seenTexts = new Set();
-
-        // 1. Prioritize Hindsight results but verify them against query terms
-        const filteredRecall = recallMemories.filter(item => {
-          const t = String(item.text || '').toLowerCase();
-          if (!t.trim() || /pg 版 memos API 写入测试|发送了一条消息|没有完成|^这是一条 /.test(t)) return false;
-          // If we have query terms, check if the recall matches at least one (looser judge for hindsight)
-          return qTerms.length === 0 || qTerms.some(term => t.includes(term));
-        });
-
-        for (const item of filteredRecall.slice(0, 3)) {
-          const text = extractDisplayText(item.text || '').slice(0, 250);
-          if (text && !seenTexts.has(text)) {
-            facts.push(`- [recall] ${text}`);
-            seenTexts.add(text);
-          }
+            if (h?.ok) {
+              const recall = await Promise.race([
+                hindsight.recall(query, { topK: 4 }),
+                new Promise(resolve => setTimeout(() => resolve({ ok: false, detail: 'recall timeout' }), 2200))
+              ]);
+              recallMemories = Array.isArray(recall?.data?.results) ? recall.data.results : [];
+              hindsightUsed = recallMemories.length > 0;
+            }
+          } catch (_) {}
         }
 
-        // 2. Add high-quality semantic hits as supporting evidence
-        const verifiedMemos = rawMemos.filter(item => {
-          const content = extractDisplayText(item.content || '').toLowerCase();
-          if (!content || seenTexts.has(content)) return false;
-          // High confidence threshold
-          if (item.score >= 0.85) return true;
-          // Medium confidence + strict term match
-          return item.score >= 0.45 && qTerms.every(term => content.includes(term));
-        });
+        // 轻裁决：脚本不过度理解，只做去噪、来源分层、基础排序
+        const memoFacts = alignedMemos.map(item => ({
+          type: 'evidence',
+          text: extractDisplayText(item.content || '').slice(0, 250),
+          score: Number(item.score || 0),
+          updated_ts: item.updated_ts || 0,
+        })).filter(x => x.text);
 
-        for (const item of verifiedMemos.slice(0, Math.max(0, 5 - facts.length))) {
-          const content = extractDisplayText(item.content || '').slice(0, 250);
-          facts.push(`- [evidence] ${content}`);
-          seenTexts.add(content);
+        const recallFacts = recallMemories.map(item => ({
+          type: 'recall',
+          text: extractDisplayText(item?.text || '').slice(0, 250),
+        })).filter(x => x.text && !isNoiseText(x.text)).slice(0, 3);
+
+        const fileFacts = fileBrainHits.map(item => ({
+          type: 'file',
+          text: `${extractDisplayText(item.text || '').slice(0, 220)} (Source: ${item.path}#L${item.line})`,
+          score: Number(item.score || 0),
+        })).filter(x => x.text).slice(0, 2);
+
+        const rankedFacts = [];
+        const seen = new Set();
+        for (const item of [...memoFacts, ...recallFacts, ...fileFacts]) {
+          if (!item.text || seen.has(item.text)) continue;
+          seen.add(item.text);
+          rankedFacts.push(item);
+          if (rankedFacts.length >= 5) break;
         }
 
-        // Stage 4: Synthesis
-        log('info', 'layer2_answer:hindsight_reflect');
-        let reflect = null;
-        if (hindsightUsed && facts.length > 0) {
-          reflect = await Promise.race([
+        let reflectText = null;
+        if (hindsightUsed && rankedFacts.length > 0 && rankedFacts.length <= 3) {
+          log('info', 'layer2_answer:hindsight_reflect');
+          const reflect = await Promise.race([
             hindsight.reflect(query),
-            new Promise(resolve => setTimeout(() => resolve(null), 12000))
+            new Promise(resolve => setTimeout(() => resolve(null), 2200))
           ]).catch(() => null);
+          if (reflect?.ok) {
+            reflectText = typeof reflect.data === 'string'
+              ? reflect.data.slice(0, 600)
+              : String(reflect.data?.text || JSON.stringify(reflect.data)).slice(0, 600);
+          }
         }
 
-        let judgment = facts.length > 0 ? '已找到相关证据，先按证据回答。' : '未查到足够证据';
-        if (reflect?.ok) {
-          judgment = typeof reflect.data === 'string'
-            ? reflect.data.slice(0, 800)
-            : String(reflect.data?.text || JSON.stringify(reflect.data)).slice(0, 800);
-        }
+        const factLines = rankedFacts.map(f => `- [${f.type}] ${f.text}`);
+        const uncertainty = [];
+        if (!memoFacts.length && recallFacts.length) uncertainty.push('本次主要依赖 Hindsight recall，缺少足够 memos 硬证据');
+        if (!memoFacts.length && !fileFacts.length && !recallFacts.length) uncertainty.push('当前 query 与现有记忆之间可能存在表征鸿沟');
+        uncertainty.push(hindsightUsed ? 'Hindsight 已作为 recall 增强层参与' : 'Hindsight 未参与或未返回有效 recall');
+        if (fileFacts.length > 0 && memoFacts.length === 0) uncertainty.push('本次有文件脑 fallback 参与，但 file brain 不是原话证据层');
 
-        log('info', 'layer2_answer:return', `facts=${facts.length}`);
-        return `已确认事实：\n${facts.length ? facts.join('\n') : '- 无'}\n\n归纳判断：\n- ${judgment}\n\n不确定点：\n- ${hindsightUsed ? 'Hindsight 已作为增强层参与' : 'Hindsight 离线，仅使用本地证据'}\n\n[PRO-TIP] 证据召回由 memos + Hindsight 双路裁决：memos 负责硬核实锤（实体对齐），Hindsight 负责语义联想。`;
+        const judgment = memoFacts.length > 0
+          ? '已取回 memos 主证据，最终理解与取舍应由 agent 主导。'
+          : fileFacts.length > 0 || recallFacts.length > 0
+            ? '已取回候选记忆，但仍建议由 agent 进一步做语义裁决。'
+            : '未查到足够证据。';
+
+        log('info', 'layer2_answer:return', `facts=${rankedFacts.length}`);
+        return `已确认事实：\n${factLines.length ? factLines.join('\n') : '- 无'}\n\n归纳判断：\n- ${judgment}${reflectText ? `\n- Hindsight候选归纳：${reflectText}` : ''}\n\n不确定点：\n${uncertainty.map(x => `- ${x}`).join('\n')}\n\n[PRO-TIP] 当前 Layer2 已收口为“轻脚本供料 + agent 主导裁决”：memos 主位，file brain fallback，Hindsight 仅做 recall/reflect 增强。`;
       }
 
       case 'layer2_version': {
-        return `openclaw-memory-layer2 v0.2.0
-MCP server: Layer2 Memory (memos PostgreSQL + shared OpenClaw embedding)
+        return `hybrid-memory v0.2.3
+MCP server: Hybrid Memory (memos PostgreSQL + shared OpenClaw embedding)
 Workspace: ${WORKSPACE}
 embedding: ${EMBED_API_KEY ? `configured (${EMBED_MODEL})` : 'NOT CONFIGURED'}
 PostgreSQL: ${PG.host}:${PG.port}/${PG.database}`;
@@ -663,7 +896,7 @@ PostgreSQL: ${PG.host}:${PG.port}/${PG.database}`;
       case 'layer2_list_commands': {
         const r = await TOOLS.list();
         const names = r.tools.map(t => `  ${t.name}: ${t.description.split('.')[0]}`).join('\n');
-        return `Available Layer2 tools:\n${names}`;
+        return `Available Hybrid Memory tools:\n${names}`;
       }
 
       default:
@@ -684,7 +917,7 @@ async function handleLine(line) {
     respond(id, {
       protocolVersion: '2024-11-05',
       capabilities: { tools: {} },
-      serverInfo: { name: 'openclaw-memory-layer2', version: '0.2.0' },
+      serverInfo: { name: 'hybrid-memory', version: '0.2.3' },
     });
     return;
   }

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Layer2 Doctor — standalone diagnostic for openclaw-memory-layer2
+ * Hybrid Memory Doctor — standalone diagnostic for hybrid-memory
  * Run: node doctor.js
  */
 'use strict';

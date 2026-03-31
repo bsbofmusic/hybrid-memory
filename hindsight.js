@@ -26,6 +26,13 @@ function loadHindsightConfig() {
   };
 }
 
+let ensureBankCache = {
+  bankId: null,
+  ok: false,
+  ts: 0,
+};
+const ENSURE_BANK_TTL_MS = Math.max(5000, Number(process.env.HINDSIGHT_ENSURE_TTL_MS || 60000));
+
 async function hcFetch(path, options = {}) {
   const cfg = loadHindsightConfig();
   const base = cfg.baseUrl.replace(/\/$/, '');
@@ -85,11 +92,19 @@ async function healthcheck() {
   }
 }
 
-async function ensureBank() {
+async function ensureBank({ force = false } = {}) {
   const cfg = loadHindsightConfig();
-  console.error('[hindsight] ensureBank:start', JSON.stringify({ bankId: cfg.bankId }));
-  const body = JSON.stringify({ reflect_mission: 'Layer2 advanced memory bank for OpenClaw recall and reflection' });
-  return hcFetch(`/v1/default/banks/${encodeURIComponent(cfg.bankId)}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body });
+  const now = Date.now();
+  if (!force && ensureBankCache.ok && ensureBankCache.bankId === cfg.bankId && (now - ensureBankCache.ts) < ENSURE_BANK_TTL_MS) {
+    return { ok: true, cached: true, detail: 'ensureBank cache hit' };
+  }
+  console.error('[hindsight] ensureBank:start', JSON.stringify({ bankId: cfg.bankId, force }));
+  const body = JSON.stringify({ reflect_mission: 'Hybrid Memory advanced memory bank for OpenClaw recall and reflection' });
+  const res = await hcFetch(`/v1/default/banks/${encodeURIComponent(cfg.bankId)}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body });
+  if (res?.ok) {
+    ensureBankCache = { bankId: cfg.bankId, ok: true, ts: now };
+  }
+  return res;
 }
 
 async function recall(query, { topK = 5 } = {}) {

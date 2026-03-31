@@ -1,6 +1,6 @@
-# @bsbofmusic/openclaw-memory-layer2
+# @bsbofmusic/hybrid-memory
 
-[![NPM Version](https://img.shields.io/npm/v/@bsbofmusic/openclaw-memory-layer2.svg)](https://www.npmjs.com/package/@bsbofmusic/openclaw-memory-layer2)
+[![NPM Version](https://img.shields.io/npm/v/@bsbofmusic/hybrid-memory.svg)](https://www.npmjs.com/package/@bsbofmusic/hybrid-memory)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 > [English](#english) | [中文](#中文)
@@ -12,7 +12,7 @@
 ## English
 
 ### Introduction
-**OpenClaw Memory Layer2** is a production-grade Long-term Memory MCP (Model Context Protocol) Server designed for the OpenClaw ecosystem. It bridges the gap between raw conversation logs and high-precision retrieval by combining **Hindsight** (Semantic Recall) and **PostgreSQL Memos** (Hard Evidence Verification).
+**Hybrid Memory** is a production-grade Long-term Memory MCP (Model Context Protocol) Server designed for the OpenClaw ecosystem. It bridges the gap between raw conversation logs and high-precision retrieval by combining **Hindsight** (Semantic Recall) and **PostgreSQL Memos** (Hard Evidence Verification).
 
 ### Core Features
 - **Hindsight-First, Memos-as-Judge**: Uses Hindsight for broad semantic association while enforcing strict entity alignment via Memos to prevent "hallucinated recall".
@@ -23,7 +23,7 @@
 ### Quick Start
 ```bash
 # Install
-npm install @bsbofmusic/openclaw-memory-layer2
+npm install @bsbofmusic/hybrid-memory
 
 # Run Diagnostics
 npm run doctor
@@ -39,7 +39,7 @@ npm run pm2:start
 ## 中文
 
 ### 简介
-**OpenClaw Memory Layer2** 是为 OpenClaw 生态设计的生产级长效记忆 MCP 服务。它通过结合 **Hindsight**（语义召回）与 **PostgreSQL Memos**（硬核实锤校验），解决了原始对话记录在召回时的“语义漂移”与“幻觉”问题。
+**Hybrid Memory** 是为 OpenClaw 生态设计的生产级长效记忆 MCP 服务。它通过结合 **Hindsight**（语义召回）与 **PostgreSQL Memos**（硬核实锤校验），解决了原始对话记录在召回时的“语义漂移”与“幻觉”问题。
 
 ### 核心特性
 - **Hindsight 召回，Memos 裁决**：利用 Hindsight 进行广度语义联想，同时通过 Memos 进行严格的实体对齐（关键词校验），防止“张冠李戴”。
@@ -50,7 +50,7 @@ npm run pm2:start
 ### 快速开始
 ```bash
 # 安装
-npm install @bsbofmusic/openclaw-memory-layer2
+npm install @bsbofmusic/hybrid-memory
 
 # 运行诊断
 npm run doctor

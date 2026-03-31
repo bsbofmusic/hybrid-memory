@@ -1,17 +1,17 @@
 {
-  "name": "@bsbofmusic/openclaw-memory-layer2",
+  "name": "@bsbofmusic/hybrid-memory",
   "version": "0.2.3",
-  "description": "Layer2 Memory MCP Server — Hindsight + memos unified validation over memos PostgreSQL, reusing OpenClaw memorySearch embedding config",
+  "description": "Hybrid Memory MCP Server — Hindsight + memos unified validation over memos PostgreSQL, reusing OpenClaw memorySearch embedding config",
   "main": "index.js",
   "bin": {
-    "openclaw-memory-layer2": "index.js"
+    "hybrid-memory": "index.js"
   },
   "scripts": {
     "start": "node index.js",
     "doctor": "node doctor.js",
-    "pm2:start": "pm2 start pm2.layer2.config.cjs",
-    "pm2:restart": "pm2 restart openclaw-memory-layer2",
-    "pm2:stop": "pm2 stop openclaw-memory-layer2",
+    "pm2:start": "pm2 start pm2.hybrid-memory.config.cjs",
+    "pm2:restart": "pm2 restart hybrid-memory",
+    "pm2:stop": "pm2 stop hybrid-memory",
     "feed:hindsight": "node feed_hindsight_from_memos.js"
   },
   "dependencies": {
@@ -25,7 +25,7 @@
     "openclaw",
     "memory",
     "mcp",
-    "layer2",
+    "hybrid-memory",
     "memos",
     "semantic-search"
   ],
@@ -36,7 +36,7 @@
     "doctor.js",
     "hindsight.js",
     "feed_hindsight_from_memos.js",
-    "pm2.layer2.config.cjs",
+    "pm2.hybrid-memory.config.cjs",
     "README.md",
     "start.sh"
   ],

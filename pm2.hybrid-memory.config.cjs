@@ -1,10 +1,11 @@
 module.exports = {
   apps: [
     {
-      name: 'openclaw-memory-layer2',
+      name: 'hybrid-memory',
       script: './index.js',
-      cwd: '/var/lib/openclaw/.openclaw/workspace/npm-pkgs/openclaw-memory-layer2',
+      cwd: '/var/lib/openclaw/.openclaw/workspace/npm-pkgs/hybrid-memory',
       interpreter: 'node',
+      exec_mode: 'fork',
       instances: 1,
       autorestart: true,
       watch: false,
