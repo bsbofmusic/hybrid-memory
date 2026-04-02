@@ -1,6 +1,6 @@
 {
   "name": "@bsbofmusic/hybrid-memory",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Hybrid Memory MCP server for OpenClaw — Hindsight主脑 + FBM-style LLM reinforcement (V2) + memos fallback",
   "main": "index.js",
   "bin": {

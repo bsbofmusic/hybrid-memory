@@ -5,12 +5,16 @@
  *
  * Provider priority:
  *   1. minimax provider from openclaw.json (models.providers.minimax)
- *      endpoint: https://api.minimaxi.com/v1/chat/completions (OpenAI-compatible)
+ *      endpoint: https://api.minimaxi.com/anthropic/v1/messages (Anthropic-compatible)
+ *      headers: x-api-key + anthropic-version
  *   2. env override: HYBRID_LLM_BASE_URL + HYBRID_LLM_API_KEY
- *   3. siliconflow fallback (memorySearch remote config)
+ *   3. siliconflow fallback (memorySearch remote config, OpenAI-compat)
  *
  * Default model: MiniMax-M2.7
  * Fallback: rules-v1 (reinforcement.js) if LLM unavailable
+ *
+ * MiniMax activation note: capabilities are fully activated only when
+ * system prompt clearly defines identity, rules, boundaries, and output format.
  */
 
 const fs = require('fs');
@@ -26,16 +30,18 @@ function loadConfig() {
   try {
     const cfg = JSON.parse(fs.readFileSync(OPENCLAW_CONFIG, 'utf8'));
 
-    // Priority 1: minimax provider (OpenAI-compatible endpoint)
+    // Priority 1: minimax provider (Anthropic-compatible endpoint)
     const mm = cfg?.models?.providers?.minimax;
     if (mm?.apiKey && mm?.baseUrl) {
-      // minimax uses /v1/chat/completions (OpenAI-compat), not /anthropic
-      const base = mm.baseUrl.replace(/\/anthropic\/?$/, '').replace(/\/$/, '');
+      // minimax uses Anthropic-compat: https://api.minimaxi.com/anthropic/v1/messages
+      // Normalize: strip trailing slash, ensure /anthropic/v1 suffix
+      let base = mm.baseUrl.replace(/\/$/, '');
+      if (!base.endsWith('/v1')) base = base.replace(/\/anthropic\/?$/, '') + '/anthropic/v1';
       return {
         apiKey: mm.apiKey,
-        baseUrl: base + '/v1',
+        baseUrl: base,
         modelId: 'MiniMax-M2.7',
-        provider: 'minimax',
+        provider: 'minimax-anthropic',
       };
     }
 
@@ -91,23 +97,51 @@ async function chat(systemPrompt, userContent, opts = {}) {
 
   if (!cfg.apiKey) throw new Error(`LLM: no API key (provider: ${cfg.provider})`);
 
-  const body = {
-    model: modelId,
-    messages: [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: userContent },
-    ],
-    max_tokens: maxTokens,
-    temperature,
-  };
-  if (json) body.response_format = { type: 'json_object' };
-
-  const res = await Promise.race([
-    fetch(`${cfg.baseUrl}/chat/completions`, {
+  let fetchPromise;
+  if (cfg.provider === 'minimax-anthropic') {
+    // Anthropic-compatible: x-api-key header, /messages endpoint
+    // MiniMax does NOT support top-level `system` field (returns error 1033)
+    // Inject system prompt as first user message instead
+    const messages = systemPrompt
+      ? [
+          { role: 'user', content: `[系统指令]\n${systemPrompt}\n[用户输入]\n${userContent}` },
+        ]
+      : [{ role: 'user', content: userContent }];
+    const body = {
+      model: modelId,
+      max_tokens: maxTokens,
+      messages,
+    };
+    fetchPromise = fetch(`${cfg.baseUrl}/messages`, {
+      method: 'POST',
+      headers: {
+        'x-api-key': cfg.apiKey,
+        'anthropic-version': '2023-06-01',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    });
+  } else {
+    // OpenAI-compatible fallback
+    const body = {
+      model: modelId,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userContent },
+      ],
+      max_tokens: maxTokens,
+      temperature,
+    };
+    if (json) body.response_format = { type: 'json_object' };
+    fetchPromise = fetch(`${cfg.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${cfg.apiKey}`, 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
-    }),
+    });
+  }
+
+  const res = await Promise.race([
+    fetchPromise,
     new Promise((_, rej) => setTimeout(() => rej(new Error('LLM timeout')), LLM_TIMEOUT_MS)),
   ]);
 
@@ -116,8 +150,19 @@ async function chat(systemPrompt, userContent, opts = {}) {
     throw new Error(`LLM ${res.status} (${cfg.provider}): ${txt.slice(0, 200)}`);
   }
   const data = await res.json();
-  // strip <think>...</think> from minimax reasoning output
-  let result = (data?.choices?.[0]?.message?.content || '').replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+
+  // parse response: anthropic-compat vs openai-compat
+  let raw;
+  if (cfg.provider === 'minimax-anthropic') {
+    // content is an array; find the text block (type==='text'), not the thinking block
+    const textBlock = (data?.content || []).find(b => b.type === 'text');
+    raw = textBlock?.text || '';
+    // strip any residual <thinking> tags just in case
+    raw = raw.replace(/<thinking>[\s\S]*?<\/thinking>/g, '').trim();
+  } else {
+    raw = (data?.choices?.[0]?.message?.content || '').replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+  }
+  let result = raw;
 
   try { fs.writeFileSync(cacheFile, JSON.stringify({ result, ts: Date.now() })); } catch {}
   return result;

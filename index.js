@@ -976,7 +976,7 @@ const TOOLS = {
       }
 
       case 'layer2_version': {
-        return `hybrid-memory v0.3.0
+        return `hybrid-memory v0.3.1
 MCP server: Hybrid Memory (memos PostgreSQL + shared OpenClaw embedding)
 Workspace: ${WORKSPACE}
 embedding: ${EMBED_API_KEY ? `configured (${EMBED_MODEL})` : 'NOT CONFIGURED'}
