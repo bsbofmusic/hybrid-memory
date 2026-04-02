@@ -44,9 +44,9 @@ function upsertSection(content, sectionMarker, entries, markerFormat) {
     });
   } else {
     // Section missing — insert before "## 变更记录" or at end
-    const变更Re = /^## 变更记录$/m;
-    if (变更Re.test(content)) {
-      return content.replace(变更Re, `${sectionMarker}\n${entries.join('\n')}\n\n$&`);
+    const changeLogRe = /^## 变更记录$/m;
+    if (changeLogRe.test(content)) {
+      return content.replace(changeLogRe, `${sectionMarker}\n${entries.join('\n')}\n\n$&`);
     }
     return content.trimEnd() + '\n\n' + sectionMarker + '\n' + entries.join('\n') + '\n';
   }

@@ -187,12 +187,16 @@ function buildConsolidationPlan(items = [], existingCapsules = {}) {
   const clusters = [];
 
   const topicRules = [
-    { key: 'memory-architecture', title: '记忆系统架构与主链规则', patterns: [/memorysearch|hybrid-memory|hindsight|memos|记忆系统|主链|memory architecture/i] },
-    { key: 'reinforcement-fbm', title: 'FBM 补强层与独立模块设计', patterns: [/fbm|补强模块|reinforcement|独立模块|github升级|跟随github/i] },
-    { key: 'gateway-runtime', title: 'Gateway / systemd / PM2 运行链路', patterns: [/gateway|systemd|pm2|openclaw\.service|启动链/i] },
-    { key: 'backup-disaster-recovery', title: '记忆系统灾备与定时链', patterns: [/cron|backup|灾备|session\.maintenance|snapshot|pg_dump/i] },
-    { key: 'piercing-pillow', title: '耳洞枕项目节点', patterns: [/耳洞枕|穿孔枕|piercing pillow/i] },
-    { key: 'user-commitments', title: '用户指令与关键推进要求', patterns: [/做出来|落地测试|循环迭代优化|你倒是做啊|帮我全量检查|统一好/i] },
+    { key: 'memory-architecture', title: '记忆系统架构与主链规则', patterns: [/memorysearch|hybrid-memory|hindsight|memos|记忆系统|主链|memory architecture|layer2|文件脑|回忆路由|recall路由/i] },
+    { key: 'reinforcement-fbm', title: 'FBM 补强层与独立模块设计', patterns: [/fbm|补强模块|reinforcement|独立模块|github升级|跟随github|仿生|自我整理|自演化|capsule|consolidat/i] },
+    { key: 'gateway-runtime', title: 'Gateway / systemd / PM2 运行链路', patterns: [/gateway|systemd|pm2|openclaw\.service|启动链|18789|openclaw-gateway|进程管理/i] },
+    { key: 'backup-disaster-recovery', title: '记忆系统灾备与定时链', patterns: [/cron|backup|灾备|session\.maintenance|snapshot|pg_dump|crontab|定时|备份|恢复链/i] },
+    { key: 'piercing-pillow', title: '耳洞枕项目节点', patterns: [/耳洞枕|穿孔枕|piercing pillow|耳洞|样品|发货|大货/i] },
+    { key: 'user-commitments', title: '用户指令与关键推进要求', patterns: [/做出来|落地测试|循环迭代优化|你倒是做啊|帮我全量检查|统一好|搞掂|验收|交付/i] },
+    { key: 'reddit-crawler', title: 'Reddit 采集与爬虫工程', patterns: [/reddit|crawler|爬虫|采集|corner.bed|piercing.pillow.reddit|crawl_project/i] },
+    { key: 'openclaw-config', title: 'OpenClaw 配置与插件', patterns: [/openclaw\.json|lossless-claw|plugins\.entries|plugins\.slots|contextEngine|session\.maintenance|memorySearch|agents\.defaults/i] },
+    { key: 'discord-integration', title: 'Discord 集成与 Channel 配置', patterns: [/discord|channel.*id|bot.token|guild|webhook|discord.*integration/i] },
+    { key: 'cdp-browser', title: 'CDP 浏览器自动化', patterns: [/cdp|puppeteer|chromium|browser.*automation|cdper|cdp-chatgpt|cdp-doubao/i] },
   ];
 
   function pickTopic(text) {
