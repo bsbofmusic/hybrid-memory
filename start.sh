@@ -1,5 +1,5 @@
 #!/bin/bash
-# Layer2 MCP Server launcher
+# Hybrid Memory MCP Server launcher
 # Usage: ./start.sh
 # Env vars:
 #   SILICONFLOW_API_KEY   (required for semantic_search)

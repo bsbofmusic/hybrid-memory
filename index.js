@@ -41,6 +41,7 @@ const { spawn } = require('child_process');
 const crypto = require('crypto');
 const hindsight = require('./hindsight');
 const reinforcement = require('./reinforcement');
+const llm = require('./llm');
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 const PG = {
@@ -802,7 +803,8 @@ const TOOLS = {
         const { query } = args || {};
         if (!query) return '❌ query is required';
 
-        const reinforcementPreview = reinforcement.expandQuery(query);
+        // V2: LLM-powered query expansion (falls back to V1 rules on error)
+        const reinforcementPreview = await llm.expandQueryLLM(query).catch(() => reinforcement.expandQuery(query));
         const reinforcedQuery = [query, ...(reinforcementPreview.expansions || []).slice(0, 5)].join(' | ');
         const plan = inferQueryPlan(query);
         log('info', 'layer2_answer:plan', JSON.stringify({
@@ -956,7 +958,7 @@ const TOOLS = {
                 : '未查到足够证据。');
 
         log('info', 'layer2_answer:return', `facts=${rankedFacts.length}`);
-        return `已确认事实：\n${factLines.length ? factLines.join('\n') : '- 无'}\n\n归纳判断：\n- ${judgment}${reflectText ? `\n- Hindsight候选归纳：${reflectText}` : ''}\n\n补强模块：\n- query normalization: ${reinforcementPreview.normalized || 'n/a'}\n- query expansion(${(reinforcementPreview.expansions || []).length}): ${(reinforcementPreview.expansions || []).slice(0,8).join(' | ') || '无'}\n- rerank strategy: ${strictQuoteMode ? 'strict-quote-v1 (memos-only short evidence)' : 'rules-v1 (hindsight/file first, memos fallback)'}\n\n不确定点：\n${uncertainty.map(x => `- ${x}`).join('\n')}\n\n[PRO-TIP] 当前 Layer2 已收口为“Hindsight 主脑优先 + FBM-style reinforcement 并行补强 + memos fallback 证据层”：Hindsight 主 recall/reflect，reinforcement 负责 query expansion / rerank / consolidation hook，memos 仅在证据不足或需原话实锤时参与。`;
+        return `已确认事实：\n${factLines.length ? factLines.join('\n') : '- 无'}\n\n归纳判断：\n- ${judgment}${reflectText ? `\n- Hindsight候选归纳：${reflectText}` : ''}\n\n补强模块：\n- query normalization: ${reinforcementPreview.normalized || 'n/a'}\n- query expansion(${(reinforcementPreview.expansions || []).length}): ${(reinforcementPreview.expansions || []).slice(0,8).join(' | ') || '无'}\n- rerank strategy: ${strictQuoteMode ? 'strict-quote-v1 (memos-only short evidence)' : 'llm-v2 (hindsight/file first, memos fallback)'}\n\n不确定点：\n${uncertainty.map(x => `- ${x}`).join('\n')}\n\n[PRO-TIP] 当前 Layer2 已收口为“Hindsight 主脑优先 + FBM-style reinforcement 并行补强 + memos fallback 证据层”：Hindsight 主 recall/reflect，reinforcement 负责 query expansion / rerank / consolidation hook，memos 仅在证据不足或需原话实锤时参与。`;
       }
 
       case 'reinforcement_preview': {
@@ -974,7 +976,7 @@ const TOOLS = {
       }
 
       case 'layer2_version': {
-        return `hybrid-memory v0.2.4
+        return `hybrid-memory v0.3.0
 MCP server: Hybrid Memory (memos PostgreSQL + shared OpenClaw embedding)
 Workspace: ${WORKSPACE}
 embedding: ${EMBED_API_KEY ? `configured (${EMBED_MODEL})` : 'NOT CONFIGURED'}

@@ -56,7 +56,7 @@ Hybrid Memory 就是为了解决这个问题：
 Hybrid Memory 不是另起炉灶，而是明确做分层：
 
 - **Layer 1 / File Brain**：规则、拍板、总结
-- **Hybrid Memory / raw-facts layer**：原话、细节、时间点、承诺、上下文
+- **Hybrid Memory**：正式记忆入口；内部封装 raw-facts layer（memos）用于原话、细节、时间点、承诺、上下文
 
 这比把所有东西都塞进一个 recall 入口更稳。
 
@@ -117,13 +117,13 @@ OpenClaw File Brain / memorySearch
   └─ 规则 / 拍板 / 总结 / 稳定事实
 
 Hybrid Memory
-  ├─ memos PostgreSQL：原话 / 细节 / 时间点 / 上下文
+  ├─ memos PostgreSQL（内部事实层）：原话 / 细节 / 时间点 / 上下文
   └─ Hindsight：recall / reflect / 语义扩展
 ```
 
 一句话：
 
-> **File Brain 管稳定结论，Hybrid Memory 管历史细节与证据。**
+> **File Brain 管稳定结论，Hybrid Memory 管历史细节与证据，并内部封装 memos 事实层。**
 
 ---
 
