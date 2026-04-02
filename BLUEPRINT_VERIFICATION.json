@@ -1,0 +1,52 @@
+{
+  "timestamp": "2026-04-02T14:15:00.000+08:00",
+  "version": "0.2.4",
+  "blueprint_items": [
+    {
+      "item": "memorySearch 文件脑",
+      "status": "done",
+      "evidence": "OpenClaw memorySearch config loaded via agents.defaults.memorySearch in index.js"
+    },
+    {
+      "item": "Hindsight 主脑",
+      "status": "done",
+      "evidence": "hindsight.js integrated in layer2_answer via hindsight.recall + hindsight.reflect, shouldUseHindsight=true gate"
+    },
+    {
+      "item": "reinforcement 补强层",
+      "status": "done",
+      "evidence": "reinforcement.js expandQuery/dedupAndRerank/buildConsolidationPlan fully functional; expandQuery/normalizeQuery/dedupAndRerank unchanged"
+    },
+    {
+      "item": "memos fallback",
+      "status": "done",
+      "evidence": "shouldUseMemosFallback gate in layer2_answer triggers semanticSearch only when needed (wantsQuote/wantsCause/wantsRecent/hindsight-miss)"
+    },
+    {
+      "item": "strict quote mode",
+      "status": "done",
+      "evidence": "strictQuoteMode branch in layer2_answer activates when query contains 原话/原文/怎么说, filters long K-responses"
+    },
+    {
+      "item": "FBM式定时仿生整理",
+      "status": "done",
+      "evidence": "consolidate_capsules.js handles heading-based merge with upsertSection; cron expected at 15 */4 * * *"
+    },
+    {
+      "item": "append/update/supersede/ignore 决策引擎",
+      "status": "done",
+      "evidence": "buildConsolidationPlan with existingCapsules param, hasOwnProperty check, decideAction implements: create(no file)/ignore(>80% overlap)/supersede(已确认信号)/update(不再信号)/append(default); charOverlapRatio helper exported"
+    },
+    {
+      "item": "heading-based capsule 结构",
+      "status": "done",
+      "evidence": "mergeCapsule builds full # heading / ## 已确认事实 / ## 变更记录 / ## 证据片段 skeleton on create; append→已确认事实, supersede→变更记录+替换confirmedFacts, update→变更记录+追加已确认事实, ignore→不写文件"
+    },
+    {
+      "item": "验收测试全通过",
+      "status": "done",
+      "evidence": "test-blueprint-final.js: 41 assertions passed across 6 test groups (create/append/ignore/supersede/update/buildConsolidationPlan action field)"
+    }
+  ],
+  "overall": "PASS"
+}

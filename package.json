@@ -1,6 +1,6 @@
 {
   "name": "@bsbofmusic/hybrid-memory",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Hybrid Memory MCP Server — Hindsight + memos unified validation over memos PostgreSQL, reusing OpenClaw memorySearch embedding config",
   "main": "index.js",
   "bin": {
